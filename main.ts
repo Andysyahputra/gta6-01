@@ -1,3 +1,5 @@
+// Neon Harbor (gta6-01): a top-down 2D open-world crime game built by the recorded
+// agent session from SPEC.md — the starter's Block Dodger is replaced entirely.
 // A working gta6-01 entry (Node 22, standard library only): the game is this directory's
 // game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
 // modules, no library and no network request), and the program hands it in. It copies game/ and
