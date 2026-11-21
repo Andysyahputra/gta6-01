@@ -1,217 +1,189 @@
-// Neon Harbor — Vera Kline's mission chain (5 missions) and the free-roam
-// car-delivery job that opens up after the last one. Each mission has stages,
-// a blinking marker, a briefing, and a cash payout.
-import { SPOTS, ECONOMY } from './config.js';
-import { dist } from './rng.js';
+// Neon Harbor — Vera Kline's 5-mission story chain, then free roam with paid
+// car deliveries. Each mission has a briefing, a minimap marker and a payout.
+import { GARAGE_DELIVERY_PAY } from './config.js';
+import { Car } from './entities.js';
+import { dist2 } from './config.js';
 
-export const MISSION_DEFS = [
+const MISSIONS = [
   {
-    name: 'First Wheels',
-    briefing: 'VERA: "New in town, huh? First rule of Neon Harbor: wheels. Steal any car and bring it to my garage."',
-    pay: ECONOMY.missionPay[0],
+    id: 1, name: 'First Wheels', pay: 200,
+    briefing: 'Vera Kline: "New in town, huh? Everybody needs wheels. Steal any car and bring it to my garage."',
+    objective: 'Steal a car and bring it to the garage',
   },
   {
-    name: 'The Package',
-    briefing: 'VERA: "Take this pistol — you\'ll need it. Pick up a package at the docks and bring it back. Cops will be sniffing."',
-    pay: ECONOMY.missionPay[1],
+    id: 2, name: 'The Package', pay: 400,
+    briefing: 'Vera Kline: "Take this pistol — you will need it. Pick up my package at the harbor docks and bring it back. The harbor police are nosy."',
+    objective: 'Pick up the package at the harbor',
   },
   {
-    name: 'Harbor Heist',
-    briefing: 'VERA: "A Sunset Coupe is sitting in the Tower Lot downtown. Lift it clean and deliver it to the docks. Get spotted and the job is burned."',
-    pay: ECONOMY.missionPay[2],
+    id: 3, name: 'Harbor Heist', pay: 700,
+    briefing: 'Vera Kline: "A Sunset Coupe is parked by the downtown towers. Lift it and deliver it to the docks. Do not get spotted."',
+    objective: 'Steal the Sunset Coupe downtown',
   },
   {
-    name: 'Clean Getaway',
-    briefing: 'VERA: "Three stars and every cruiser in the city is on you. Lose them. Get to the safehouse and the heat dies."',
-    pay: ECONOMY.missionPay[3],
+    id: 4, name: 'Clean Getaway', pay: 900,
+    briefing: 'Vera Kline: "Three stars on you, Rex. Lose them and get to the safehouse. Do not stop for anyone."',
+    objective: 'Lose the heat — reach the safehouse',
   },
   {
-    name: 'The Big Score',
-    briefing: 'VERA: "The big one. Take the box truck, hit Harbor National Bank, hold the lobby while they close in, then vanish. Do this and you run this city."',
-    pay: ECONOMY.missionPay[4],
+    id: 5, name: 'The Big Score', pay: 1500,
+    briefing: 'Vera Kline: "The big one. Take the box truck to Harbor Bank, grab the cash, hold the line, then vanish to the safehouse. You pull this off, you run this city."',
+    objective: 'Take the box truck to Harbor Bank',
   },
 ];
 
-export class Missions {
-  constructor(game) {
-    this.game = game;
-    this.completed = 0;       // missions finished
-    this.current = null;      // active mission state
-    this.freeRoam = false;
-    this.deliveryCd = 0;
-    this.briefing = null;     // { title, text, t }
-    this.banner = null;       // { text, sub, t }
-    this.titleScreen = null;  // set after mission 5
+export class MissionChain {
+  constructor(g) {
+    this.g = g; // game context: player, world, traffic, police, audio, hooks
+    this.index = 0; // 0-based mission index; 5 = all done (free roam)
+    this.stage = 0;
+    this.timer = 0;
+    this.active = false;
+    this.hasPackage = false;
+    this.missionCar = null; // special car for missions 3 and 5
+    this.holdout = 0;
+    this.completedCount = 0;
+    this.startPos = null; // where the current mission was started
+    this.leftStart = false; // true once the player drove/walked away from it
   }
-
-  get active() { return this.current; }
-
+  get done() { return this.index >= MISSIONS.length; }
+  get current() { return MISSIONS[this.index] || null; }
   objectiveText() {
-    if (this.titleScreen) return 'Free Roam — Neon Harbor King';
-    if (!this.current) return this.freeRoam ? 'Free Roam — deliver cars to the garage ($150)' : 'No active mission';
-    return this.current.objective;
-  }
-
-  startMission(i) {
-    const def = MISSION_DEFS[i];
-    const g = this.game;
-    this.current = {
-      index: i, name: def.name, stage: 0, objective: '', marker: null,
-      timer: 0, holdout: 0, carId: null, pickupT: 0,
-    };
-    this.briefing = { title: `MISSION ${i + 1} — ${def.name}`, text: def.briefing, t: 6 };
-    g.audio.pickup();
-    if (i === 1) {
-      g.player.hasPistol = true;
-      g.player.ammo = ECONOMY.ammoRounds;
-      g.hudMessage('Pistol received — 12 rounds');
-    }
-    if (i === 2) g.ensureCoupeAtLot();
-    if (i === 3) { g.police.wanted = 3; g.hudMessage('3 stars! Lose the cops!'); }
-    if (i === 4) g.ensureTruckAtDepot();
-    this.setStage(0);
-  }
-
-  setStage(stage) {
+    if (this.done) return 'Free Roam — deliver stolen cars to the garage ($150 each)';
     const m = this.current;
-    if (!m) return;
-    m.stage = stage;
-    const g = this.game;
-    switch (m.index) {
-      case 0:
-        if (stage === 0) { m.objective = 'Steal any car (walk up, press E)'; m.marker = null; }
-        else { m.objective = 'Drive the car to Vera\'s Garage'; m.marker = { ...SPOTS.garage, label: 'GARAGE' }; }
-        break;
-      case 1:
-        if (stage === 0) { m.objective = 'Drive to the Harbor Docks'; m.marker = { ...SPOTS.docks, label: 'DOCKS' }; }
-        else if (stage === 1) { m.objective = 'Picking up the package…'; m.marker = { ...SPOTS.docks, label: 'DOCKS' }; }
-        else { m.objective = 'Package secured! Return to the Garage'; m.marker = { ...SPOTS.garage, label: 'GARAGE' }; }
-        break;
-      case 2:
-        if (stage === 0) { m.objective = 'Steal the Sunset Coupe at the Tower Lot'; m.marker = { ...SPOTS.coupeLot, label: 'SUNSET COUPE' }; }
-        else { m.objective = 'Deliver the Coupe to the Docks — stay clean!'; m.marker = { ...SPOTS.docks, label: 'DOCKS' }; }
-        break;
-      case 3:
-        m.objective = 'Lose the heat — reach the Safehouse';
-        m.marker = { ...SPOTS.safehouse, label: 'SAFEHOUSE' };
-        break;
-      case 4:
-        if (stage === 0) { m.objective = 'Get the Box Truck at the Depot'; m.marker = { ...SPOTS.truckDepot, label: 'BOX TRUCK' }; }
-        else if (stage === 1) { m.objective = 'Drive the truck to the Bank'; m.marker = { ...SPOTS.bank, label: 'BANK' }; }
-        else if (stage === 2) { m.objective = 'HOLD THE BANK — stay in the zone!'; m.marker = { ...SPOTS.bank, label: 'BANK' }; }
-        else { m.objective = 'Cash grabbed! Escape to the Safehouse'; m.marker = { ...SPOTS.safehouse, label: 'SAFEHOUSE' }; }
-        break;
-    }
+    if (m.id === 2 && this.stage === 1) return 'Bring the package back to Vera at the garage';
+    if (m.id === 3 && this.stage === 1) return 'Deliver the Sunset Coupe to the docks — stay unseen';
+    if (m.id === 5 && this.stage === 1) return 'Reach Harbor Bank in the box truck';
+    if (m.id === 5 && this.stage === 2) return `Hold the bank! Survive ${Math.ceil(this.holdout)}s`;
+    if (m.id === 5 && this.stage === 3) return 'Escape to the safehouse with the cash';
+    return m.objective;
   }
-
-  update(dt) {
-    const g = this.game;
-    if (this.briefing) { this.briefing.t -= dt; if (this.briefing.t <= 0) this.briefing = null; }
-    if (this.banner) { this.banner.t -= dt; if (this.banner.t <= 0) this.banner = null; }
-    if (this.deliveryCd > 0) this.deliveryCd -= dt;
+  targetPos() {
+    const L = this.g.world.landmarks;
+    if (this.done) return L.garage;
     const m = this.current;
-    if (!m) { this.freeRoamDelivery(); return; }
-    const p = g.player;
-    const car = g.playerCar;
-
-    const at = (spot, r) => dist(p.x, p.y, spot.x, spot.y) < r;
-    switch (m.index) {
-      case 0:
-        if (m.stage === 0 && car) this.setStage(1);
-        else if (m.stage === 1 && car && at(SPOTS.garage, 100)) this.complete();
-        break;
-      case 1:
-        if (m.stage === 0 && at(SPOTS.docks, 100)) { this.setStage(1); m.pickupT = 1.2; }
-        else if (m.stage === 1) {
-          m.pickupT -= dt;
-          if (m.pickupT <= 0) {
-            this.setStage(2);
-            g.police.addWanted(1, 'package');
-            g.hudMessage('Package secured — cops incoming!');
-            g.audio.cash();
-          }
-        } else if (m.stage === 2 && at(SPOTS.garage, 100)) this.complete();
-        break;
-      case 2:
-        if (m.stage === 0 && car && car.model === 'coupe' && car.id === g.missionCarId) this.setStage(1);
-        else if (m.stage === 1) {
-          if (g.police.wanted >= 3) { this.fail('Spotted! The crew burned the job.'); return; }
-          if (car && car.id === g.missionCarId && at(SPOTS.docks, 100)) this.complete();
-        }
-        break;
-      case 3:
-        if (at(SPOTS.safehouse, 110)) {
-          g.police.clearWanted();
-          this.complete();
-        }
-        break;
-      case 4:
-        if (m.stage === 0 && car && car.model === 'truck' && car.id === g.missionCarId) this.setStage(1);
-        else if (m.stage === 1 && car && car.model === 'truck' && at(SPOTS.bank, 110)) {
-          this.setStage(2);
-          m.holdout = 20;
-          g.police.wanted = Math.max(g.police.wanted, 4);
-          g.hudMessage('Hold the bank! 20 seconds!');
-        } else if (m.stage === 2) {
-          m.holdout -= dt;
-          if (!at(SPOTS.bank, 130)) { m.holdout = 20; g.hudMessage('Get back in the bank zone!'); }
-          else if (m.holdout <= 0) {
-            this.setStage(3);
-            g.audio.cash();
-            g.hudMessage('Cash grabbed! RUN!');
-          }
-        } else if (m.stage === 3 && at(SPOTS.safehouse, 110)) this.complete();
-        break;
+    if (m.id === 1) return L.garage;
+    if (m.id === 2) return this.stage === 0 ? L.harborPickup : L.vera;
+    if (m.id === 3) return this.stage === 0 ? L.coupeSpot : L.docks;
+    if (m.id === 4) return L.safehouse;
+    if (m.id === 5) {
+      if (this.stage === 0) return L.truckSpot;
+      if (this.stage === 1) return L.bank;
+      if (this.stage === 2) return L.bank;
+      return L.safehouse;
     }
-    this.freeRoamDelivery();
+    return L.garage;
   }
-
-  freeRoamDelivery() {
-    const g = this.game;
-    if (!this.freeRoam || !g.playerCar || this.deliveryCd > 0) return;
-    if (dist(g.player.x, g.player.y, SPOTS.garage.x, SPOTS.garage.y) < 100) {
-      const car = g.playerCar;
-      g.earnCash(ECONOMY.deliveryPay);
-      g.removePlayerCar(car);
-      this.deliveryCd = 5;
-      g.hudMessage(`Car delivered! +$${ECONOMY.deliveryPay}`);
-      g.audio.cash();
+  start() {
+    if (this.done || this.active) return;
+    const m = this.current;
+    this.active = true; this.stage = 0; this.timer = 0;
+    this.startPos = this.g.missionStartPos();
+    this.leftStart = false;
+    this.g.showBriefing(m.name, m.briefing);
+    this.g.audio.pickup();
+    if (m.id === 2 && !this.g.player.pistol) {
+      this.g.player.pistol = true;
+      this.g.player.ammo = 12;
+    }
+    if (m.id === 3) {
+      const L = this.g.world.landmarks;
+      const c = new Car('coupe', L.coupeSpot.x, L.coupeSpot.y, 0);
+      c.driver = 'parked'; c.isMissionCar = true;
+      this.g.traffic.parked.push(c);
+      this.missionCar = c;
+    }
+    if (m.id === 4) this.g.setWanted(3);
+    if (m.id === 5) {
+      const L = this.g.world.landmarks;
+      const c = new Car('truck', L.truckSpot.x, L.truckSpot.y, Math.PI / 2);
+      c.driver = 'parked'; c.isMissionCar = true;
+      this.g.traffic.parked.push(c);
+      this.missionCar = c;
     }
   }
-
   complete() {
-    const g = this.game;
     const m = this.current;
-    const pay = MISSION_DEFS[m.index].pay;
-    g.earnCash(pay);
-    this.completed = m.index + 1;
-    this.banner = { text: `MISSION COMPLETE — ${m.name}`, sub: `+$${pay}`, t: 3.5 };
-    g.audio.missionDone();
-    g.police.calmTimer = 0;
-    this.current = null;
-    g.saveGame();
-    if (this.completed >= 5) {
-      this.freeRoam = true;
-      this.titleScreen = { t: 6 };
-      g.hudMessage('Free Roam — deliver cars to the garage for $150');
-    } else {
-      this.startMission(this.completed);
+    const pay = m.pay;
+    this.g.player.cash += pay;
+    this.completedCount++;
+    this.g.audio.cash();
+    this.g.showBanner(`MISSION COMPLETE — ${m.name}  +$${pay}`);
+    this.index++;
+    this.active = false; this.stage = 0; this.hasPackage = false;
+    this.missionCar = null;
+    this.startPos = null; this.leftStart = false;
+    this.g.saveGame();
+    if (this.done) {
+      this.g.showBanner('NEON HARBOR KING — free roam! Deliver cars to the garage for $150 each.');
+      this.g.king = true;
     }
   }
-
-  fail(reason) {
-    const g = this.game;
-    const idx = this.current.index;
-    this.current = null;
-    g.hudMessage(reason);
-    g.audio.denied();
-    this.startMission(idx);
+  near(x, y, r) {
+    const p = this.g.player.pos();
+    return dist2(p.x, p.y, x, y) < r * r;
   }
-
-  restartCurrent() {
-    if (!this.current) return;
-    const idx = this.current.index;
-    this.current = null;
-    this.startMission(idx);
+  update(dt) {
+    if (!this.active || this.done) return;
+    const m = this.current;
+    const L = this.g.world.landmarks;
+    const player = this.g.player;
+    // The player must leave the start area before a return-to-start mission
+    // can complete, so starting on top of the target never auto-completes it.
+    if (this.startPos) {
+      const p = player.pos();
+      if (dist2(p.x, p.y, this.startPos.x, this.startPos.y) > 260 * 260) this.leftStart = true;
+    }
+    if (m.id === 1) {
+      if (this.leftStart && player.inCar && this.near(L.garage.x, L.garage.y, 110)) this.complete();
+    } else if (m.id === 2) {
+      if (this.stage === 0 && this.near(L.harborPickup.x, L.harborPickup.y, 70)) {
+        this.stage = 1; this.hasPackage = true;
+        this.g.setWanted(1);
+        this.g.audio.pickup();
+        this.g.showBanner('Package secured — get back to Vera!');
+      } else if (this.stage === 1 && this.leftStart && this.near(L.vera.x, L.vera.y, 110)) this.complete();
+    } else if (m.id === 3) {
+      if (this.stage === 0 && player.inCar === this.missionCar) {
+        this.stage = 1;
+        this.g.addWanted(1);
+        this.g.showBanner('Spotted! Get the Coupe to the docks!');
+      } else if (this.stage === 1 && player.inCar === this.missionCar && this.near(L.docks.x, L.docks.y, 110)) {
+        this.complete();
+      }
+    } else if (m.id === 4) {
+      if (this.leftStart && this.near(L.safehouse.x, L.safehouse.y, 110)) this.complete();
+    } else if (m.id === 5) {
+      if (this.stage === 0 && player.inCar === this.missionCar) {
+        this.stage = 1;
+        this.g.showBanner('Truck secured — drive to Harbor Bank!');
+      } else if (this.stage === 1 && player.inCar === this.missionCar && this.near(L.bank.x, L.bank.y, 110)) {
+        this.stage = 2; this.holdout = 20;
+        this.g.setWanted(4);
+        this.g.showBanner('Grab the cash! Hold out while the HPD closes in!');
+      } else if (this.stage === 2) {
+        this.holdout -= dt;
+        if (this.holdout <= 0) {
+          this.stage = 3;
+          this.g.showBanner('Cash grabbed! Escape to the safehouse!');
+        }
+      } else if (this.stage === 3 && this.leftStart && this.near(L.safehouse.x, L.safehouse.y, 110)) {
+        this.complete();
+      }
+    }
+  }
+  // Free-roam delivery: any stolen car brought to the garage pays $150.
+  tryDelivery() {
+    if (!this.done) return false;
+    const player = this.g.player;
+    const L = this.g.world.landmarks;
+    if (player.inCar && !player.inCar.delivered && this.near(L.garage.x, L.garage.y, 110)) {
+      player.inCar.delivered = true;
+      player.cash += GARAGE_DELIVERY_PAY;
+      this.g.audio.cash();
+      this.g.showBanner(`Car delivered  +$${GARAGE_DELIVERY_PAY}`);
+      return true;
+    }
+    return false;
   }
 }
