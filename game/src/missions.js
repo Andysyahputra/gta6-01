@@ -1,263 +1,198 @@
-// Neon Harbor — missions.js
-// One job: Vera Kline's mission chain (7 missions) plus the free-roam
-// car-delivery side job. Each mission is a small stage machine: a target
-// marker, a condition, and a payout. Completing one unlocks the next.
-(function (global) {
-  'use strict';
+// Neon Harbor — the story: 7 missions from fixer Vera Kline, one at a
+// time, each with a briefing, a blinking marker and a payout. After the
+// chain, free roam with $150 car deliveries to the garage.
 
-  var NH = global.NH || (global.NH = {});
-  var CFG = NH.config;
-  var L = CFG.landmarks;
+import { LANDMARKS } from './config.js';
+import { createCar } from './cars.js';
 
-  function Missions(game) {
-    this.game = game;
-    this.index = 0;              // 0-based mission; 7 = chain done
+export const MISSION_LIST = [
+  { id: 1, name: 'First Wheels', pay: 200, brief: 'VERA: Rex, you need wheels. Steal any car and bring it to the garage on the east side.' },
+  { id: 2, name: 'The Package', pay: 400, brief: 'VERA: Take this pistol. Fetch my package at the harbor docks and bring it back. Cops will notice.' },
+  { id: 3, name: 'Harbor Heist', pay: 700, brief: 'VERA: A Sunset Coupe sits in the downtown tower lot. Lift it and deliver it to the docks. Quietly.' },
+  { id: 4, name: 'Clean Getaway', pay: 900, brief: 'VERA: You are hot — 3 stars. Lose the heat and reach the safehouse. Do not get caught.' },
+  { id: 5, name: 'Sunset Taxi', pay: 600, brief: 'VERA: My client waits at the market. Pick him up in a taxi and get him downtown before the clock runs out.' },
+  { id: 6, name: 'The Big Score', pay: 1500, brief: 'VERA: Drive the box truck to Harbor Bank, grab the cash, hold out while the cops close in, then run for the safehouse.' },
+  { id: 7, name: 'Neon Harbor King', pay: 2000, brief: 'VERA: Last job, Rex. Lose a 5-star chase and bring a Comet GT to the yacht marina. Then this city is yours.' },
+];
+
+export class MissionSystem {
+  constructor(G) {
+    this.G = G;
+    this.index = 0; // 0-based into MISSION_LIST; 7 = free roam
     this.stage = 0;
+    this.target = null;
     this.timer = 0;
-    this.holdTimer = 0;
-    this.hits = 0;
-    this.targetCar = null;
-    this.banner = null;
+    this.holdout = 0;
+    this.banner = '';
     this.bannerTimer = 0;
-    this.deliveryCar = null;
-    this.message = null;
-    this.messageTimer = 0;
-  }
-
-  Missions.prototype.current = function () {
-    return CFG.missions[this.index] || null;
-  };
-
-  Missions.prototype.isDone = function () {
-    return this.index >= CFG.missions.length;
-  };
-
-  Missions.prototype.startMission = function (idx) {
-    this.index = idx;
-    this.stage = 0;
-    this.timer = 0;
-    this.holdTimer = 0;
-    this.hits = 0;
+    this.active = false;
     this.targetCar = null;
-    var m = this.current();
+    this.deliveries = 0;
+    this.setupCurrent();
+  }
+  current() { return MISSION_LIST[this.index] || null; }
+  objectiveText() {
+    const m = this.current();
+    if (!m) return 'FREE ROAM — deliver any car to the garage for $150';
+    const t = this.target;
+    const where = t ? t.label : '';
+    if (this.index === 0) return `M1 First Wheels: bring any car to the Garage`;
+    if (this.index === 1) return this.stage === 0 ? `M2 The Package: pick up at Harbor Docks` : `M2 The Package: return to the Safehouse`;
+    if (this.index === 2) return this.stage === 0 ? `M3 Harbor Heist: steal the Sunset Coupe (${where})` : `M3 Harbor Heist: deliver the Coupe to the Docks`;
+    if (this.index === 3) return `M4 Clean Getaway: lose the heat, reach the Safehouse`;
+    if (this.index === 4) return this.stage === 0 ? `M5 Sunset Taxi: pick up the client at the Market (${Math.ceil(this.timer)}s)` : `M5 Sunset Taxi: deliver him Downtown (${Math.ceil(this.timer)}s)`;
+    if (this.index === 5) return this.stage === 0 ? `M6 The Big Score: drive the truck to Harbor Bank` : this.stage === 1 ? `M6 The Big Score: HOLD OUT ${Math.ceil(this.holdout)}s!` : `M6 The Big Score: escape to the Safehouse`;
+    if (this.index === 6) return `M7 Neon Harbor King: lose 5 stars, bring a Comet GT to the Yacht Marina`;
+    return m.name;
+  }
+  setupCurrent() {
+    const G = this.G;
+    const L = LANDMARKS;
+    this.stage = 0; this.timer = 0; this.holdout = 0; this.targetCar = null;
+    this.active = this.index < MISSION_LIST.length;
+    if (!this.active) { this.target = { x: L.garage.x, y: L.garage.y, label: 'Garage — $150 per car' }; return; }
+    switch (this.index) {
+      case 0: this.target = { x: L.garage.x, y: L.garage.y, label: 'Garage' }; break;
+      case 1: this.target = { x: L.harbor.x, y: L.harbor.y, label: 'Harbor Docks' }; G.player.hasPistol = true; G.player.ammo = 12; break;
+      case 2: {
+        this.target = { x: L.towerLot.x, y: L.towerLot.y, label: 'Tower Lot' };
+        const c = createCar('coupe', L.towerLot.x, L.towerLot.y, 0, { parked: true, driver: false });
+        this.targetCar = c; G.cars.push(c);
+        break;
+      }
+      case 3: this.target = { x: L.safehouse.x, y: L.safehouse.y, label: 'Safehouse' }; G.setWanted(3, 'mission heat'); break;
+      case 4: this.target = { x: L.market.x, y: L.market.y, label: 'Market pickup' }; this.timer = 75; break;
+      case 5: {
+        this.target = { x: L.bank.x, y: L.bank.y, label: 'Harbor Bank' };
+        const c = createCar('truck', 900, 900, 0, { parked: true, driver: false });
+        this.targetCar = c; G.cars.push(c);
+        break;
+      }
+      case 6: this.target = { x: L.yacht.x, y: L.yacht.y, label: 'Yacht Marina' }; G.setWanted(5, 'final heat'); break;
+      default: this.target = { x: L.garage.x, y: L.garage.y, label: 'Garage' };
+    }
+    const m = this.current();
+    if (m) this.showBanner(`${m.name} — ${m.brief}`);
+  }
+  showBanner(text) { this.banner = text; this.bannerTimer = 6; }
+  completeMission() {
+    const G = this.G;
+    const m = this.current();
     if (!m) return;
-    this.showMessage(m.brief, 5);
-    if (m.id === 2) {
-      this.game.player.hasPistol = true;
-      this.game.player.ammo = CFG.player.pistolAmmoMax;
-    }
-    if (m.id === 4) this.game.setWanted(3, 'mission');
-    if (m.id === 6) this.spawnGetawayCar();
-    if (m.id === 7) this.spawnTruck();
-    this.game.save();
-  };
-
-  Missions.prototype.spawnGetawayCar = function () {
-    var model = CFG.carModels.filter(function (mm) { return mm.name === 'Comet GT'; })[0];
-    var car = new NH.Car(model, 1750, 950, 0);
-    car.occupied = true;
-    car.isTarget = true;
-    this.targetCar = car;
-    this.game.extraCars.push(car);
-  };
-
-  Missions.prototype.spawnTruck = function () {
-    var model = CFG.carModels.filter(function (mm) { return mm.name === 'Box Truck'; })[0];
-    var car = new NH.Car(model, L.safehouse.x + 90, L.safehouse.y + 20, 0);
-    car.occupied = false;
-    car.isTarget = true;
-    this.targetCar = car;
-    this.game.extraCars.push(car);
-  };
-
-  Missions.prototype.showMessage = function (text, seconds) {
-    this.message = text;
-    this.messageTimer = seconds || 4;
-  };
-
-  Missions.prototype.showBanner = function (text, seconds) {
-    this.banner = text;
-    this.bannerTimer = seconds || 3.5;
-  };
-
-  // Where should the minimap/HUD marker point right now?
-  Missions.prototype.targetPoint = function () {
-    var game = this.game;
-    var m = this.current();
-    if (!m) {
-      // Free roam: garage delivery marker if carrying a car.
-      if (game.player.inCar) return { x: L.garage.x, y: L.garage.y, label: 'Garage — deliver for $150' };
-      return { x: L.garage.x, y: L.garage.y, label: 'Garage' };
-    }
-    switch (m.id) {
-      case 1: return { x: L.garage.x, y: L.garage.y, label: 'Garage' };
-      case 2: return this.stage === 0
-        ? { x: L.docks.x, y: L.docks.y, label: 'Package at the docks' }
-        : { x: L.garage.x, y: L.garage.y, label: 'Return to Vera' };
-      case 3: return this.stage === 0
-        ? { x: L.downtownLot.x, y: L.downtownLot.y, label: 'Sunset Coupe' }
-        : { x: L.docks.x, y: L.docks.y, label: 'Deliver to the docks' };
-      case 4: return { x: L.safehouse.x, y: L.safehouse.y, label: 'Safehouse' };
-      case 5: return this.stage === 0
-        ? { x: L.market.x, y: L.market.y, label: 'Fare at the market' }
-        : { x: L.beachHotel.x, y: L.beachHotel.y, label: 'Beach Hotel' };
-      case 6: return this.targetCar
-        ? { x: this.targetCar.x, y: this.targetCar.y, label: 'Getaway car' }
-        : { x: L.garage.x, y: L.garage.y, label: 'Garage' };
-      case 7: return this.stage === 0
-        ? { x: L.bank.x, y: L.bank.y, label: 'Harbor Bank' }
-        : { x: L.safehouse.x, y: L.safehouse.y, label: 'Escape to the safehouse' };
-    }
-    return { x: L.garage.x, y: L.garage.y, label: 'Garage' };
-  };
-
-  Missions.prototype.near = function (x, y, radius) {
-    var p = this.game.player;
-    var px = p.inCar ? p.inCar.x : p.x;
-    var py = p.inCar ? p.inCar.y : p.y;
-    return Math.hypot(px - x, py - y) < radius;
-  };
-
-  Missions.prototype.completeMission = function () {
-    var game = this.game;
-    var m = this.current();
-    if (!m) return;
-    game.cash += m.pay;
-    this.showBanner('MISSION COMPLETE — ' + m.name + '   +$' + m.pay, 4);
-    game.audio.payout();
+    G.player.cash += m.pay;
+    G.audio.cash();
+    this.showBanner(`MISSION COMPLETE: ${m.name} — +$${m.pay}`);
+    G.addFloatText(G.player.x, G.player.y - 40, `+$${m.pay}`, '#7be0a3');
+    G.saveGame();
     this.index++;
-    this.stage = 0;
-    this.timer = 0;
-    if (this.targetCar) { this.targetCar.isTarget = false; this.targetCar = null; }
-    if (this.isDone()) {
-      this.showMessage('NEON HARBOR KING — Vera: "The city is yours now, Rex. Free roam: deliver cars to the garage for $150 each."', 8);
-      game.king = true;
-    } else {
-      this.startMission(this.index);
+    if (this.index >= MISSION_LIST.length) {
+      this.showBanner('NEON HARBOR KING — Rex owns this city. Free roam: deliver cars to the garage for $150.');
+      G.king = true;
     }
-    game.save();
-  };
-
-  Missions.prototype.failMission = function (reason) {
-    var game = this.game;
-    this.showMessage('MISSION FAILED — ' + reason + '. Vera: "Shake it off. Try again."', 4);
-    this.stage = 0;
-    this.timer = 0;
-    this.holdTimer = 0;
-    if (this.current() && this.current().id === 4) game.setWanted(3, 'mission');
-    if (this.current() && this.current().id === 6) this.spawnGetawayCar();
-    game.save();
-  };
-
-  // Called every frame by main.js.
-  Missions.prototype.update = function (dt) {
-    var game = this.game;
-    this.bannerTimer = Math.max(0, this.bannerTimer - dt);
-    this.messageTimer = Math.max(0, this.messageTimer - dt);
-    if (this.bannerTimer <= 0) this.banner = null;
-    if (this.messageTimer <= 0) this.message = null;
-
-    var m = this.current();
-    if (!m) { this.updateFreeRoam(dt); return; }
-    var p = game.player;
-
-    if (m.id === 1) {
-      if (p.inCar && this.near(L.garage.x, L.garage.y, 90)) this.completeMission();
-    } else if (m.id === 2) {
-      if (this.stage === 0) {
-        if (this.near(L.docks.x, L.docks.y, 80)) {
-          this.stage = 1;
-          this.showMessage('Package grabbed! Get it back to Vera — the cops noticed.', 4);
-          game.setWanted(1, 'mission');
-        }
-      } else if (this.near(L.garage.x, L.garage.y, 90)) this.completeMission();
-    } else if (m.id === 3) {
-      if (this.stage === 0) {
-        // The Sunset Coupe waits in the downtown lot; stealing it starts the run.
-        if (!this.targetCar) {
-          var model = CFG.carModels.filter(function (mm) { return mm.name === 'Sunset Coupe'; })[0];
-          var car = new NH.Car(model, L.downtownLot.x, L.downtownLot.y, Math.PI / 2);
-          car.occupied = false; car.isTarget = true;
-          this.targetCar = car;
-          game.extraCars.push(car);
-        }
-        if (p.inCar === this.targetCar) {
-          this.stage = 1;
-          this.showMessage('Coupe lifted! Deliver it to the docks — stay out of sight.', 4);
-        }
-      } else if (p.inCar === this.targetCar && this.near(L.docks.x, L.docks.y, 90)) {
-        this.completeMission();
+    this.setupCurrent();
+  }
+  atTarget(d = 70) {
+    const p = this.G.player.inCar || this.G.player;
+    return this.target && Math.hypot(p.x - this.target.x, p.y - this.target.y) < d;
+  }
+  update(dt) {
+    const G = this.G;
+    if (this.bannerTimer > 0) this.bannerTimer -= dt;
+    if (!this.active) {
+      // Free roam deliveries
+      if (G.player.inCar && this.atTarget(80)) {
+        const car = G.player.inCar;
+        G.player.cash += 150; this.deliveries++;
+        G.audio.cash();
+        this.showBanner(`Car delivered! +$150 (deliveries: ${this.deliveries})`);
+        G.cars = G.cars.filter((c) => c !== car);
+        G.player.inCar = null;
+        G.saveGame();
       }
-    } else if (m.id === 4) {
-      if (game.wanted === 0 && this.near(L.safehouse.x, L.safehouse.y, 90)) this.completeMission();
-    } else if (m.id === 5) {
-      if (this.stage === 0) {
-        if (p.inCar && this.near(L.market.x, L.market.y, 80)) {
-          this.stage = 1;
-          this.timer = 75;
-          this.showMessage('Fare aboard! 75 seconds to the Beach Hotel — step on it.', 4);
-        }
-      } else {
-        this.timer -= dt;
-        if (this.timer <= 0) { this.failMission('Out of time'); return; }
-        if (p.inCar && this.near(L.beachHotel.x, L.beachHotel.y, 90)) this.completeMission();
-      }
-    } else if (m.id === 6) {
-      if (this.targetCar) {
-        // The getaway car flees along the roads; ramming it counts a hit.
-        var t = this.targetCar;
-        var tx = p.inCar ? p.inCar.x : p.x;
-        var ty = p.inCar ? p.inCar.y : p.y;
-        t.angle += Math.sin(game.time * 0.7) * 0.4 * dt;
-        t.speed = 300;
-        var nx = t.x + Math.cos(t.angle) * t.speed * dt;
-        var ny = t.y + Math.sin(t.angle) * t.speed * dt;
-        if (!game.world.collideBuildings(nx, ny, 22) && game.world.onWalkable(nx, ny)) { t.x = nx; t.y = ny; }
-        else t.angle += Math.PI / 2;
-        if (p.inCar && Math.hypot(t.x - tx, t.y - ty) < 60 && game.time - (this.lastHitAt || -99) > 1.2) {
-          this.lastHitAt = game.time;
-          this.hits++;
-          game.audio.bump();
-          game.spawnSparks(t.x, t.y, 8, '#ffd94d');
-          this.showMessage('Hit ' + this.hits + ' of 3!', 1.5);
-          if (this.hits >= 3) { t.wrecked = true; this.completeMission(); }
-        }
-      }
-    } else if (m.id === 7) {
-      if (this.stage === 0) {
-        if (!this.targetCar) this.spawnTruck();
-        var truck = this.targetCar;
-        if (p.inCar === truck && this.near(L.bank.x, L.bank.y, 100)) {
-          this.stage = 1;
-          this.holdTimer = 20;
-          this.showMessage('Vault open! Hold the bank for 20 seconds while the cops close in.', 4);
-          game.setWanted(3, 'mission');
-        }
-      } else {
-        this.holdTimer -= dt;
-        if (this.holdTimer <= 0) {
-          this.stage = 2;
-          this.showMessage('Cash grabbed! Lose the heat and reach the safehouse.', 4);
-        }
-        if (this.stage === 2 && this.near(L.safehouse.x, L.safehouse.y, 90)) this.completeMission();
-      }
+      return;
     }
-  };
-
-  // After the chain: any stolen car delivered to the garage pays $150.
-  Missions.prototype.updateFreeRoam = function (dt) {
-    var game = this.game;
-    var p = game.player;
-    if (p.inCar && !p.inCar.isPolice && this.near(L.garage.x, L.garage.y, 90)) {
-      var car = p.inCar;
-      game.exitCar();
-      game.removeCar(car);
-      game.cash += CFG.prices.deliveryPay;
-      this.showBanner('CAR DELIVERED   +$' + CFG.prices.deliveryPay, 3);
-      game.audio.payout();
-      game.save();
+    if (this.index === 4 && this.timer > 0) {
+      this.timer -= dt;
+      if (this.timer <= 0) { this.showBanner('Too slow! The client walked away. Mission reset.'); this.setupCurrent(); return; }
     }
-  };
-
-  NH.Missions = Missions;
-})(typeof window !== 'undefined' ? window : globalThis);
+    if (this.index === 5 && this.stage === 1) {
+      this.holdout -= dt;
+      if (this.holdout <= 0) { this.stage = 2; this.target = { x: LANDMARKS.safehouse.x, y: LANDMARKS.safehouse.y, label: 'Safehouse' }; this.showBanner('Cash grabbed! Now escape to the safehouse!'); }
+      return;
+    }
+    if (!this.atTarget()) return;
+    switch (this.index) {
+      case 0:
+        if (G.player.inCar) this.completeMission();
+        break;
+      case 1:
+        if (this.stage === 0) {
+          this.stage = 1; this.target = { x: LANDMARKS.safehouse.x, y: LANDMARKS.safehouse.y, label: 'Safehouse' };
+          G.setWanted(1, 'package pickup'); G.audio.pickup();
+          this.showBanner('Package secured! Get back to the safehouse — cops are coming.');
+        } else this.completeMission();
+        break;
+      case 2:
+        if (this.stage === 0) {
+          if (G.player.inCar && G.player.inCar === this.targetCar) {
+            this.stage = 1; this.target = { x: LANDMARKS.harbor.x, y: LANDMARKS.harbor.y, label: 'Harbor Docks' };
+            G.addWanted(1, 'stolen coupe spotted');
+            this.showBanner('Coupe stolen! Deliver it to the docks.');
+          }
+        } else if (G.player.inCar === this.targetCar) this.completeMission();
+        break;
+      case 3:
+        if (G.wanted === 0) this.completeMission();
+        else this.showBanner('Still hot! Lose the stars first — stay out of sight.');
+        break;
+      case 4:
+        if (this.stage === 0) {
+          this.stage = 1; this.target = { x: LANDMARKS.downtown.x, y: LANDMARKS.downtown.y, label: 'Downtown' };
+          this.timer = 75; this.showBanner('Client aboard! Downtown, fast!');
+        } else this.completeMission();
+        break;
+      case 5:
+        if (this.stage === 0) {
+          if (G.player.inCar && G.player.inCar === this.targetCar) {
+            this.stage = 1; this.holdout = 12; G.setWanted(3, 'bank alarm');
+            this.showBanner('Alarm tripped! Hold out 12 seconds!');
+          }
+        } else if (this.stage === 2) this.completeMission();
+        break;
+      case 6:
+        if (G.wanted === 0 && G.player.inCar && G.player.inCar.modelKey === 'comet') this.completeMission();
+        else if (G.wanted > 0) this.showBanner('Still 5 stars! Lose the heat first, then bring a Comet GT here.');
+        else this.showBanner('Bring a Comet GT to the marina to finish!');
+        break;
+      default: break;
+    }
+  }
+  drawMarker(ctx, t) {
+    if (!this.target) return;
+    const pulse = 1 + Math.sin(t * 5) * 0.15;
+    const { x, y, label } = this.target;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = '#ffdd33';
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    ctx.moveTo(0, 26 * pulse);
+    ctx.lineTo(16 * pulse, -6);
+    ctx.lineTo(0, -26 * pulse);
+    ctx.lineTo(-16 * pulse, -6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#111';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('★', 0, 2);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 3;
+    ctx.strokeText(label, 20, -18);
+    ctx.fillText(label, 20, -18);
+    ctx.restore();
+  }
+}

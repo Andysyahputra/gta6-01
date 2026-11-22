@@ -1,88 +1,36 @@
-// Neon Harbor — input.js
-// One job: keyboard + mouse state, edge-triggered presses, and the
-// debug/shot query params. The game reads only this module for input.
-(function (global) {
-  'use strict';
+// Neon Harbor — keyboard + mouse input. One job: track what is held,
+// what was just pressed, and where the mouse points in world space.
 
-  var NH = global.NH || (global.NH = {});
-
-  function Input(canvas) {
-    this.keys = {};
-    this.pressed = {};
-    this.mouseX = 0;
-    this.mouseY = 0;
+export class Input {
+  constructor(canvas) {
+    this.keys = new Set();
+    this.pressed = new Set();
+    this.mouseX = 0; this.mouseY = 0;
     this.mouseDown = false;
-    this.mouseClicked = false;
+    this.mousePressed = false;
     this.canvas = canvas;
-    var self = this;
-
-    global.addEventListener('keydown', function (e) {
-      var k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].indexOf(e.key) >= 0) e.preventDefault();
-      if (!self.keys[k]) self.pressed[k] = true;
-      self.keys[k] = true;
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+      if (!this.keys.has(k)) this.pressed.add(k);
+      this.keys.add(k);
     });
-    global.addEventListener('keyup', function (e) {
-      var k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-      self.keys[k] = false;
+    window.addEventListener('keyup', (e) => this.keys.delete(e.key.toLowerCase()));
+    window.addEventListener('blur', () => { this.keys.clear(); });
+    canvas.addEventListener('mousemove', (e) => {
+      const r = canvas.getBoundingClientRect();
+      this.mouseX = (e.clientX - r.left) * (canvas.width / r.width);
+      this.mouseY = (e.clientY - r.top) * (canvas.height / r.height);
     });
-    canvas.addEventListener('mousemove', function (e) {
-      var r = canvas.getBoundingClientRect();
-      self.mouseX = e.clientX - r.left;
-      self.mouseY = e.clientY - r.top;
+    canvas.addEventListener('mousedown', (e) => {
+      this.mouseDown = true; this.mousePressed = true;
+      const r = canvas.getBoundingClientRect();
+      this.mouseX = (e.clientX - r.left) * (canvas.width / r.width);
+      this.mouseY = (e.clientY - r.top) * (canvas.height / r.height);
     });
-    canvas.addEventListener('mousedown', function (e) {
-      self.mouseDown = true;
-      self.mouseClicked = true;
-      var r = canvas.getBoundingClientRect();
-      self.mouseX = e.clientX - r.left;
-      self.mouseY = e.clientY - r.top;
-    });
-    global.addEventListener('mouseup', function () { self.mouseDown = false; });
-    global.addEventListener('blur', function () { self.keys = {}; });
+    window.addEventListener('mouseup', () => { this.mouseDown = false; });
   }
-
-  Input.prototype.down = function () {
-    for (var i = 0; i < arguments.length; i++) {
-      if (this.keys[arguments[i]]) return true;
-    }
-    return false;
-  };
-
-  Input.prototype.wasPressed = function () {
-    for (var i = 0; i < arguments.length; i++) {
-      if (this.pressed[arguments[i]]) return true;
-    }
-    return false;
-  };
-
-  // Movement axes: -1..1 for on-foot and driving.
-  Input.prototype.moveX = function () {
-    return (this.down('d', 'ArrowRight') ? 1 : 0) - (this.down('a', 'ArrowLeft') ? 1 : 0);
-  };
-
-  Input.prototype.moveY = function () {
-    return (this.down('s', 'ArrowDown') ? 1 : 0) - (this.down('w', 'ArrowUp') ? 1 : 0);
-  };
-
-  Input.prototype.endFrame = function () {
-    this.pressed = {};
-    this.mouseClicked = false;
-  };
-
-  // ?shot=start|drive|chase|mission&seed=N — used by the screenshot run
-  // to jump the game straight into a real state.
-  Input.queryParams = function () {
-    var out = {};
-    var q = global.location ? global.location.search.replace(/^\?/, '') : '';
-    if (!q) return out;
-    var pairs = q.split('&');
-    for (var i = 0; i < pairs.length; i++) {
-      var kv = pairs[i].split('=');
-      if (kv[0]) out[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || '');
-    }
-    return out;
-  };
-
-  NH.Input = Input;
-})(typeof window !== 'undefined' ? window : globalThis);
+  down(...names) { return names.some((n) => this.keys.has(n)); }
+  wasPressed(...names) { return names.some((n) => this.pressed.has(n)); }
+  endFrame() { this.pressed.clear(); this.mousePressed = false; }
+}

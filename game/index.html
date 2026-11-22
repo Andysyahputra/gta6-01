@@ -3,45 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Neon Harbor — a sun-soaked open-world crime game</title>
+<title>Neon Harbor — Open-World Crime Game</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #17142a; height: 100%; overflow: hidden; }
-  body { display: flex; align-items: center; justify-content: center; font-family: sans-serif; }
-  #wrap { position: relative; width: 1280px; height: 720px; max-width: 100vw; max-height: 100vh; }
-  canvas { display: block; width: 100%; height: 100%; background: #7ec850; image-rendering: auto; }
-  #muteBtn {
-    position: absolute; right: 14px; bottom: 64px; z-index: 5;
-    background: rgba(20,18,32,0.72); color: #fff; border: 1px solid #ffdf3d;
-    border-radius: 6px; padding: 6px 10px; font: bold 13px sans-serif; cursor: pointer;
-  }
+  html, body { margin: 0; padding: 0; background: #1c2b4a; height: 100%; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { width: 100vw; height: 100vh; object-fit: contain; display: block; background: #f7c873; }
 </style>
 </head>
 <body>
-<div id="wrap">
-  <canvas id="game" width="1280" height="720"></canvas>
-  <button id="muteBtn" type="button" title="Toggle sound (0)">SOUND: ON</button>
-</div>
-<script src="src/config.js"></script>
-<script src="src/rng.js"></script>
-<script src="src/world.js"></script>
-<script src="src/input.js"></script>
-<script src="src/player.js"></script>
-<script src="src/cars.js"></script>
-<script src="src/traffic.js"></script>
-<script src="src/police.js"></script>
-<script src="src/missions.js"></script>
-<script src="src/hud.js"></script>
-<script src="src/audio.js"></script>
-<script src="src/main.js"></script>
-<script>
-  // Mute button wiring (the only inline script; everything else is a file).
-  document.getElementById('muteBtn').addEventListener('click', function () {
-    var g = window.__neonHarbor;
-    if (!g) return;
-    g.audio.resume();
-    g.audio.setMuted(!g.audio.muted);
-    this.textContent = g.audio.muted ? 'SOUND: OFF' : 'SOUND: ON';
-  });
-</script>
+<div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>
