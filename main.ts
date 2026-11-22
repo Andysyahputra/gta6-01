@@ -1,10 +1,12 @@
-// Neon Harbor (gta6-01): a top-down 2D open-world crime game, built fresh by
-// the recorded agent session from SPEC.md — the starter's Block Dodger is
-// replaced entirely by a full city: drivable traffic, police chases, a wanted
-// system, Vera Kline's 5-mission story chain, combat, a HUD with minimap, and
-// localStorage saves. A working gta6-01 entry (Node 22, standard library
-// only): the game is this directory's game/ folder, plain static files a
-// desktop browser loads offline (game/index.html and its ES modules, no
+// Neon Harbor (gta6-01): a top-down 2D open-world crime game, rebuilt
+// from scratch in the recorded session of 2026-11-22 (attempt 3) from
+// SPEC.md + ATM-BRIEF.md — the starter's Block Dodger is replaced entirely
+// by a full sun-soaked city: drivable traffic, police chases with roadblocks
+// and the AIR-1 helicopter at 3+ stars, a wanted system, Vera Kline's
+// 7-mission story chain, combat, a HUD with minimap, and localStorage saves.
+// A working gta6-01 entry (Node 22, standard library only): the game is
+// this directory's game/ folder, plain static files a desktop browser loads
+// offline (game/index.html and its classic scripts under game/src/, no
 // library and no network request), and the program hands it in. It copies
 // game/ and screenshots/ from beside this file to /output and writes
 // /output/dossier.json, the summary the judge reads, with the vendored

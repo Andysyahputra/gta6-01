@@ -1,156 +1,249 @@
-// Neon Harbor — police: patrol cars that chase, ram, and deploy officers on
-// foot; roadblocks at 3+ stars; wanted level that cools down out of sight.
-import { WORLD_W, WORLD_H, clamp, angleDiff, dist2 } from './config.js';
-import { Rng } from './rng.js';
-import { Car } from './entities.js';
-import { collideCircle } from './world.js';
+// Neon Harbor — police.js
+// One job: the wanted system. Stars rise on crimes and cool down when
+// the player hides; patrol cars chase and ram, officers get out on foot
+// (touch = busted), roadblocks appear at 3+ stars, and a police
+// helicopter circles with a spotlight at 3+ stars.
+(function (global) {
+  'use strict';
 
-export class Police {
-  constructor(world) {
-    this.world = world;
-    this.rng = new Rng(777);
-    this.cars = [];
-    this.officers = []; // on-foot officers {x,y,angle,shootCooldown,touchTimer}
-    this.spawnTimer = 0;
-    this.roadblocks = []; // {x,y} cones at 3+ stars
-    this.sirenOn = false;
+  var NH = global.NH || (global.NH = {});
+  var CFG = NH.config;
+
+  function Officer(x, y) {
+    this.x = x; this.y = y;
+    this.angle = 0;
+    this.speed = 185;
+    this.health = 50;
+    this.shootCooldown = 0;
+    this.downTimer = 0;
+    this.walkCycle = 0;
   }
-  wantedCount(wanted) { return wanted <= 0 ? 0 : wanted; }
-  update(dt, player, wanted, time, playerVel) {
-    const p = player.pos();
-    // Predictive pursuit: aim at where the player will be, not where they are.
-    const lead = playerVel ? clamp(Math.sqrt(dist2(player.x, player.y, p.x, p.y)) / 700, 0.15, 0.8) : 0;
-    const tx = p.x + (playerVel ? playerVel.x * lead : 0);
-    const ty = p.y + (playerVel ? playerVel.y * lead : 0);
-    // Spawn patrol cars up to the wanted count.
-    this.spawnTimer -= dt;
-    const want = this.wantedCount(wanted);
-    if (this.cars.length < want && this.spawnTimer <= 0) {
-      const ang = this.rng.range(0, Math.PI * 2);
-      const x = clamp(p.x + Math.cos(ang) * 620, 60, WORLD_W - 60);
-      const y = clamp(p.y + Math.sin(ang) * 420, 60, 1560);
-      const c = new Car('cruiser', x, y, Math.atan2(p.y - y, p.x - x));
-      c.driver = 'police';
-      this.cars.push(c);
-      this.spawnTimer = 1.2;
+
+  Officer.prototype.update = function (dt, game) {
+    if (this.downTimer > 0) { this.downTimer -= dt; return; }
+    var p = game.player;
+    var tx = p.inCar ? p.inCar.x : p.x;
+    var ty = p.inCar ? p.inCar.y : p.y;
+    var dx = tx - this.x, dy = ty - this.y;
+    var d = Math.hypot(dx, dy);
+    this.angle = Math.atan2(dy, dx);
+    this.shootCooldown -= dt;
+
+    // On foot, getting touched means busted.
+    if (!p.inCar && d < 26) { game.onBusted(); return; }
+
+    if (d > 30) {
+      var nx = this.x + Math.cos(this.angle) * this.speed * dt;
+      var ny = this.y + Math.sin(this.angle) * this.speed * dt;
+      if (!game.world.collideBuildings(nx, ny, 10) && game.world.onWalkable(nx, ny)) {
+        this.x = nx; this.y = ny;
+      }
+      this.walkCycle += dt * 11;
     }
-    // Despawn extra cars when wanted falls.
-    while (this.cars.length > want) this.cars.pop();
-    // Roadblocks at 3+ stars: two cone clusters ahead of the player.
+
+    // Officers shoot when close and the player is on foot.
+    if (!p.inCar && d < 320 && d > 40 && this.shootCooldown <= 0) {
+      this.shootCooldown = 1.1;
+      game.audio.policeShot();
+      var spread = (game.rng.next() - 0.5) * 0.35;
+      var a = this.angle + spread;
+      game.bullets.push({
+        x: this.x + Math.cos(a) * 18, y: this.y + Math.sin(a) * 18,
+        vx: Math.cos(a) * 560, vy: Math.sin(a) * 560,
+        life: 0.8, fromPlayer: false, damage: 9
+      });
+    }
+  };
+
+  Officer.prototype.draw = function (ctx, cam) {
+    var sx = this.x - cam.x, sy = this.y - cam.y;
+    if (this.downTimer > 0) {
+      ctx.fillStyle = '#2b4bd8';
+      ctx.beginPath(); ctx.ellipse(sx, sy, 12, 5, this.angle, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    ctx.fillStyle = 'rgba(28,26,38,0.25)';
+    ctx.beginPath(); ctx.ellipse(sx, sy + 10, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(this.angle);
+    ctx.fillStyle = '#2b4bd8';
+    ctx.fillRect(-7, -6, 14, 12);
+    ctx.fillStyle = '#1c1a26';
+    ctx.fillRect(-10, -5, 5, 10);
+    ctx.fillStyle = '#f2c98a';
+    ctx.beginPath(); ctx.arc(8, 0, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#2b4bd8';
+    ctx.fillRect(4, -7, 8, 4);
+    ctx.restore();
+  };
+
+  function Helicopter() {
+    this.angle = 0;          // orbit angle around the player
+    this.radius = 190;
+    this.x = 0; this.y = 0;
+    this.active = false;
+    this.spotAngle = 0;
+  }
+
+  Helicopter.prototype.update = function (dt, game) {
+    this.active = game.wanted >= 3;
+    if (!this.active) return;
+    var p = game.player;
+    var tx = p.inCar ? p.inCar.x : p.x;
+    var ty = p.inCar ? p.inCar.y : p.y;
+    // Circle the player, slowly tightening, spotlight tracking them.
+    this.angle += dt * 0.55;
+    this.radius = Math.max(150, this.radius - dt * 4);
+    this.x = tx + Math.cos(this.angle) * this.radius;
+    this.y = ty + Math.sin(this.angle) * this.radius - 30;
+    this.spotAngle = Math.atan2(ty - this.y, tx - this.x);
+  };
+
+  Helicopter.prototype.draw = function (ctx, cam) {
+    if (!this.active) return;
+    var sx = this.x - cam.x, sy = this.y - cam.y;
+    // Spotlight cone onto the player.
+    var p = this.spotTarget;
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.fillStyle = '#fff6c9';
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    var a1 = this.spotAngle - 0.22, a2 = this.spotAngle + 0.22;
+    var L = 260;
+    ctx.lineTo(sx + Math.cos(a1) * L, sy + Math.sin(a1) * L);
+    ctx.lineTo(sx + Math.cos(a2) * L, sy + Math.sin(a2) * L);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // Rotor blur + body.
+    ctx.strokeStyle = 'rgba(43,47,56,0.6)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(sx - 26, sy - 4); ctx.lineTo(sx + 26, sy - 4);
+    ctx.stroke();
+    ctx.fillStyle = '#2b2f38';
+    ctx.beginPath(); ctx.ellipse(sx, sy, 24, 11, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#9fd8ef';
+    ctx.beginPath(); ctx.arc(sx + 14, sy - 1, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffdf3d';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('AIR-1', sx, sy + 3);
+  };
+
+  function Police(game) {
+    this.game = game;
+    this.cars = [];
+    this.officers = [];
+    this.heli = new Helicopter();
+    this.spawnTimer = 0;
+    this.roadblocks = [];
+  }
+
+  Police.prototype.wantedCarCount = function (stars) {
+    return Math.min(CFG.maxPoliceCars, Math.max(0, stars));
+  };
+
+  Police.prototype.update = function (dt, game) {
+    var wanted = game.wanted;
+    this.heli.spotTarget = null;
+    this.heli.update(dt, game);
+
+    // Spawn patrol cars up to the wanted count.
+    var want = this.wantedCarCount(wanted);
+    this.spawnTimer -= dt;
+    if (this.cars.length < want && this.spawnTimer <= 0) {
+      this.spawnTimer = 1.2;
+      var p = game.player;
+      var px = p.inCar ? p.inCar.x : p.x;
+      var py = p.inCar ? p.inCar.y : p.y;
+      // Spawn off-screen but near: pick a road point 500-700 away.
+      var a = game.rng.float(0, Math.PI * 2);
+      var sx = px + Math.cos(a) * 620, sy = py + Math.sin(a) * 620;
+      sx = Math.max(80, Math.min(CFG.worldWidth - 80, sx));
+      sy = Math.max(80, Math.min(CFG.worldHeight - 80, sy));
+      var rp = game.world.nearestRoadPoint(sx, sy);
+      var model = CFG.carModels.filter(function (m) { return m.name === 'Patrol Cruiser'; })[0];
+      var car = new NH.Car(model, rp.x, rp.y, Math.atan2(py - rp.y, px - rp.x));
+      car.isPolice = true;
+      car.occupied = true;
+      this.cars.push(car);
+      game.audio.sirenBlip();
+    }
+
+    // Roadblocks at 3+ stars: two parked cruisers across the road ahead.
     if (wanted >= 3 && this.roadblocks.length === 0) {
-      this.roadblocks = [
-        { x: clamp(p.x + 260, 80, WORLD_W - 80), y: clamp(p.y - 120, 80, 1560) },
-        { x: clamp(p.x - 260, 80, WORLD_W - 80), y: clamp(p.y + 120, 80, 1560) },
-      ];
+      var pr = game.world.nearestRoadPoint(game.player.x + 420, game.player.y);
+      var model2 = CFG.carModels.filter(function (m) { return m.name === 'Patrol Cruiser'; })[0];
+      var r1 = new NH.Car(model2, pr.x - 30, pr.y, Math.PI / 2);
+      var r2 = new NH.Car(model2, pr.x + 30, pr.y, Math.PI / 2);
+      r1.isPolice = true; r2.isPolice = true;
+      this.roadblocks = [r1, r2];
     }
     if (wanted < 3) this.roadblocks = [];
 
-    // Chase behaviour: steer toward the player's predicted position, ram,
-    // and slide along buildings. Stuck detection: a cruiser that pushes
-    // against a wall for 1.5s reverses out and picks a fresh approach.
-    for (const c of this.cars) {
-      const d = Math.sqrt(dist2(c.x, c.y, tx, ty));
-      const aggression = 0.75 + wanted * 0.09;
-      // Stuck tracking.
-      c.lastX = c.lastX ?? c.x; c.lastY = c.lastY ?? c.y;
-      c.stuckTimer = (c.stuckTimer || 0) + dt;
-      const moved = Math.sqrt(dist2(c.x, c.y, c.lastX, c.lastY));
-      if (c.stuckTimer > 1.5) {
-        if (moved < 10 && Math.abs(c.speed) > 100) {
-          c.reverseTimer = 0.7; // back out of the trap
-          c.angle += Math.PI * (this.rng.chance(0.5) ? 1 : -1) * 0.5;
-        }
-        c.lastX = c.x; c.lastY = c.y; c.stuckTimer = 0;
+    // Chase: steer at the player, faster and more aggressive at 5 stars.
+    var i;
+    for (i = this.cars.length - 1; i >= 0; i--) {
+      var car = this.cars[i];
+      var tx = game.player.inCar ? game.player.inCar.x : game.player.x;
+      var ty = game.player.inCar ? game.player.inCar.y : game.player.y;
+      var dx = tx - car.x, dy = ty - car.y;
+      var d = Math.hypot(dx, dy);
+      var wantAngle = Math.atan2(dy, dx);
+      var diff = wantAngle - car.angle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      var aggression = 1 + wanted * 0.12;
+      car.angle += Math.max(-2.6 * aggression * dt, Math.min(2.6 * aggression * dt, diff));
+      var top = car.model.topSpeed * (0.82 + wanted * 0.05);
+      car.speed += (top - car.speed) * Math.min(1, dt * 1.2);
+      var nx = car.x + Math.cos(car.angle) * car.speed * dt;
+      var ny = car.y + Math.sin(car.angle) * car.speed * dt;
+      if (!game.world.collideBuildings(nx, ny, 22) && game.world.onWalkable(nx, ny)) {
+        car.x = nx; car.y = ny;
+      } else {
+        car.speed *= 0.4;
+        car.angle += 0.6 * dt;
       }
-      c.reverseTimer = Math.max(0, (c.reverseTimer || 0) - dt);
-      const targetAngle = Math.atan2(ty - c.y, tx - c.x);
-      const diff = angleDiff(c.angle, targetAngle);
-      c.angle += clamp(diff, -2.6 * dt, 2.6 * dt);
-      const wantSpeed = c.reverseTimer > 0 ? -220 : d > 40 ? 430 * aggression : 200;
-      c.speed += clamp(wantSpeed - c.speed, -700 * dt, 500 * dt);
-      const nx = c.x + Math.cos(c.angle) * c.speed * dt;
-      const ny = c.y + Math.sin(c.angle) * c.speed * dt;
-      const fixed = collideCircle(this.world, nx, ny, 16);
-      if (fixed.hit) c.speed *= 0.55;
-      c.x = fixed.x; c.y = fixed.y;
-      c.flash = Math.max(0, c.flash - dt);
-      // Separation: cruisers do not pile onto one another.
-      for (const other of this.cars) {
-        if (other === c) continue;
-        const od = Math.sqrt(dist2(c.x, c.y, other.x, other.y));
-        if (od > 0.01 && od < 55) {
-          const push = (55 - od) * 0.5;
-          const px = (c.x - other.x) / od, py = (c.y - other.y) / od;
-          c.x += px * push * dt * 8; c.y += py * push * dt * 8;
-        }
+
+      // Ram the player's car: only a fast impact hurts, so a pile-up
+      // grinds paint instead of totalling the player in two seconds.
+      var pc = game.player.inCar;
+      if (pc && Math.abs(car.speed) > 120 && Math.hypot(pc.x - car.x, pc.y - car.y) < 52) {
+        pc.health -= 6 * dt;
+        if (Math.abs(pc.speed) > 60) game.spawnSparks(pc.x, pc.y, 3, '#ffd94d');
+        if (pc.health <= 0) game.onWasted();
       }
-      // Deploy officers when the player is on foot and a cruiser is close.
-      if (!player.inCar && d < 150 && this.officers.length < 2 * want && this.rng.chance(0.01)) {
-        this.officers.push({
-          x: c.x + 20, y: c.y + 20, angle: 0,
-          shootCooldown: 1, touchTimer: 0,
-        });
+
+      // Close on foot: two officers bail out and chase.
+      if (!game.player.inCar && d < 120 && this.officers.length < 2 && game.time % 1 < dt) {
+        this.officers.push(new Officer(car.x + 20, car.y + 14));
+        this.officers.push(new Officer(car.x - 20, car.y - 14));
       }
+
+      // Despawn far-away units once the heat is gone.
+      if (wanted === 0 && d > 900) this.cars.splice(i, 1);
     }
-    // Officers on foot chase the player; touch = busted, they shoot at range.
-    let busted = false;
-    for (const o of this.officers) {
-      const d = Math.sqrt(dist2(o.x, o.y, p.x, p.y));
-      o.angle = Math.atan2(p.y - o.y, p.x - o.x);
-      if (!player.inCar) {
-        const sp = 165;
-        o.x += Math.cos(o.angle) * sp * dt;
-        o.y += Math.sin(o.angle) * sp * dt;
-        const fixed = collideCircle(this.world, o.x, o.y, 10);
-        o.x = fixed.x; o.y = fixed.y;
-        if (d < 26) { o.touchTimer += dt; if (o.touchTimer > 0.8) busted = true; }
-        else o.touchTimer = Math.max(0, o.touchTimer - dt * 2);
-      }
-      o.shootCooldown -= dt;
+
+    for (i = this.officers.length - 1; i >= 0; i--) {
+      var o = this.officers[i];
+      o.update(dt, game);
+      if (wanted === 0 && o.downTimer <= 0) this.officers.splice(i, 1);
+      else if (o.health <= 0 && o.downTimer <= 0) { o.downTimer = 6; }
     }
-    // Officers give up when the player drives away.
-    if (player.inCar) this.officers = this.officers.filter(() => this.rng.chance(0.98));
-    if (wanted <= 0) { this.officers = []; }
-    this.sirenOn = wanted > 0;
-    return busted;
-  }
-  // Officer shooting: returns true when an officer fires (main.js rolls accuracy).
-  officerShots(player) {
-    const p = player.pos();
-    const shots = [];
-    for (const o of this.officers) {
-      if (o.shootCooldown <= 0 && !player.inCar) {
-        const d = Math.sqrt(dist2(o.x, o.y, p.x, p.y));
-        if (d < 280 && d > 40) {
-          o.shootCooldown = 1.4;
-          shots.push({ x: o.x, y: o.y, angle: o.angle + (this.rng.float() - 0.5) * 0.22 });
-        }
-      }
-    }
-    return shots;
-  }
-  draw(ctx, time) {
-    // Roadblock cones.
-    for (const rb of this.roadblocks) {
-      ctx.fillStyle = '#ff7a2f';
-      for (let i = -1; i <= 1; i++) {
-        ctx.beginPath();
-        ctx.moveTo(rb.x + i * 26, rb.y - 12); ctx.lineTo(rb.x + i * 26 + 8, rb.y + 10); ctx.lineTo(rb.x + i * 26 - 8, rb.y + 10);
-        ctx.closePath(); ctx.fill();
-      }
-      ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('HPD', rb.x, rb.y - 18);
-    }
-    for (const c of this.cars) c.draw(ctx, time);
-    // Officers: dark blue uniforms with caps.
-    for (const o of this.officers) {
-      ctx.save(); ctx.translate(o.x, o.y);
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.beginPath(); ctx.ellipse(0, 6, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#1d2f5e'; ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#e8b04f'; ctx.beginPath(); ctx.arc(0, -8, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#12203f'; ctx.fillRect(-5, -12, 10, 3);
-      ctx.restore();
-    }
-  }
-}
+  };
+
+  Police.prototype.draw = function (ctx, cam) {
+    var i;
+    for (i = 0; i < this.roadblocks.length; i++) this.roadblocks[i].draw(ctx, cam);
+    for (i = 0; i < this.cars.length; i++) this.cars[i].draw(ctx, cam);
+    for (i = 0; i < this.officers.length; i++) this.officers[i].draw(ctx, cam);
+    this.heli.draw(ctx, cam);
+  };
+
+  NH.Police = Police;
+  NH.Officer = Officer;
+  NH.Helicopter = Helicopter;
+})(typeof window !== 'undefined' ? window : globalThis);
